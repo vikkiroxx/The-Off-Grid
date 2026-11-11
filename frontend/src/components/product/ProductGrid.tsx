@@ -6,6 +6,7 @@ interface ProductGridProps {
   category?: string;
   audience?: Audience;
   search?: string;
+  size?: string[];
   limit?: number;
 }
 
@@ -13,12 +14,14 @@ async function getProducts({
   category,
   audience,
   search,
+  size,
   limit,
 }: ProductGridProps): Promise<Product[]> {
   const params = new URLSearchParams();
   if (category) params.set("category", category);
   if (audience) params.set("audience", audience);
   if (search) params.set("search", search);
+  if (size?.length) params.set("size", size.join(","));
   if (limit) params.set("limit", String(limit));
   const query = params.toString();
 
@@ -29,8 +32,8 @@ async function getProducts({
   }
 }
 
-export async function ProductGrid({ category, audience, search, limit }: ProductGridProps) {
-  const products = await getProducts({ category, audience, search, limit });
+export async function ProductGrid({ category, audience, search, size, limit }: ProductGridProps) {
+  const products = await getProducts({ category, audience, search, size, limit });
 
   if (products.length === 0) {
     return (

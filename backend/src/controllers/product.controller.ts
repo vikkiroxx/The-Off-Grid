@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/config/prisma";
 import { audienceWhere, parseAudience } from "@/lib/audience";
+import { compareSizes } from "@/lib/sizes";
 
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -40,30 +41,48 @@ const updateProductSchema = z.object({
   variants: z.array(variantInputSchema).optional(),
 });
 
+function productFilters({
+  category,
+  audience,
+  search,
+}: {
+  category?: string;
+  audience?: string;
+  search?: string;
+}): Prisma.ProductWhereInput {
+  return {
+    isActive: true,
+    ...(category ? { category: { slug: category } } : {}),
+    ...audienceWhere(parseAudience(audience)),
+    ...(search
+      ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { description: { contains: search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+}
+
 export async function listProducts(req: Request, res: Response) {
   const {
     category,
     audience,
     search,
+    size,
     page = "1",
     limit = "20",
   } = req.query as Record<string, string | undefined>;
 
-  const audienceFilter = parseAudience(audience);
+  const sizes = size
+    ? size.split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
 
   const products = await prisma.product.findMany({
     where: {
-      isActive: true,
-      ...(category ? { category: { slug: category } } : {}),
-      ...audienceWhere(audienceFilter),
-      ...(search
-        ? {
-            OR: [
-              { name: { contains: search, mode: "insensitive" } },
-              { description: { contains: search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
+      ...productFilters({ category, audience, search }),
+      ...(sizes.length ? { variants: { some: { size: { in: sizes } } } } : {}),
     },
     include: { category: true, variants: true },
     skip: (Number(page) - 1) * Number(limit),
@@ -72,6 +91,22 @@ export async function listProducts(req: Request, res: Response) {
   });
 
   res.json(products);
+}
+
+// Distinct sizes among matching active products' variants, scoped by the
+// same category/audience/search filters as listProducts (but not by the
+// currently-selected sizes — standard faceted-filter behavior, so toggling
+// one size off doesn't make other size options disappear).
+export async function listProductSizes(req: Request, res: Response) {
+  const { category, audience, search } = req.query as Record<string, string | undefined>;
+
+  const variants = await prisma.variant.findMany({
+    where: { product: productFilters({ category, audience, search }) },
+    distinct: ["size"],
+    select: { size: true },
+  });
+
+  res.json(variants.map((v) => v.size).sort(compareSizes));
 }
 
 export async function getProduct(req: Request, res: Response) {
