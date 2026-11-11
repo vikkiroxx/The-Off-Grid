@@ -19,8 +19,8 @@ const SEARCH_DEBOUNCE_MS = 400;
 const pinIcon = L.divIcon({
   className: "",
   html: `<svg width="28" height="28" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-    <path d="M12 2C7.58 2 4 5.58 4 10c0 5.25 6.72 11.25 7.3 11.76a1 1 0 0 0 1.4 0C13.28 21.25 20 15.25 20 10c0-4.42-3.58-8-8-8z" fill="#39f3c4" stroke="#060708" stroke-width="1"/>
-    <circle cx="12" cy="10" r="3" fill="#060708"/>
+    <path d="M12 2C7.58 2 4 5.58 4 10c0 5.25 6.72 11.25 7.3 11.76a1 1 0 0 0 1.4 0C13.28 21.25 20 15.25 20 10c0-4.42-3.58-8-8-8z" fill="#ff2070" stroke="#0c0e09" stroke-width="1"/>
+    <circle cx="12" cy="10" r="3" fill="#0c0e09"/>
   </svg>`,
   iconSize: [28, 28],
   iconAnchor: [14, 28],

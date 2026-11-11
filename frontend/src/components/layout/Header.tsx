@@ -5,6 +5,7 @@ import { AdminLink } from "@/components/layout/AdminLink";
 import { CartLink } from "@/components/layout/CartLink";
 import { WishlistLink } from "@/components/layout/WishlistLink";
 import { HeaderSearch } from "@/components/layout/HeaderSearch";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 
 export function Header() {
   return (
@@ -16,12 +17,6 @@ export function Header() {
 
         <nav className="flex items-center gap-6">
           <AudienceToggle />
-          <Link
-            href="/"
-            className="font-mono text-xs tracking-widest text-foreground-muted uppercase hover:text-foreground"
-          >
-            Home
-          </Link>
           <AdminLink />
           <Link
             href="/products"
@@ -32,6 +27,7 @@ export function Header() {
           <HeaderSearch />
           <WishlistLink />
           <CartLink />
+          <ThemeToggle />
           <AccountLink />
         </nav>
       </div>

@@ -67,6 +67,19 @@ export async function startPayment(orderId: string, requestingUserId: string): P
     throw new OrderNotPayableError(`Order is ${order.status.toLowerCase()}, not payable`);
   }
 
+  // Nets out any wallet contribution already debited for this order (a split
+  // checkout pays part from the wallet up front — see createOrder) so the
+  // gateway is only ever asked for what's actually still owed, not the full
+  // order total.
+  const walletDebit = await prisma.walletTransaction.aggregate({
+    where: { orderId: order.id, type: "ORDER_PAYMENT" },
+    _sum: { amount: true },
+  });
+  const gatewayAmount = Number(order.totalAmount) - Math.abs(Number(walletDebit._sum.amount ?? 0));
+  if (gatewayAmount <= 0) {
+    throw new OrderNotPayableError("Order is already fully paid from the wallet");
+  }
+
   const provider = getPaymentProvider();
   const customer: PaymentCustomer = {
     id: order.user.id,
@@ -107,7 +120,7 @@ export async function startPayment(orderId: string, requestingUserId: string): P
       provider: provider.id,
       providerOrderId,
       idempotencyKey,
-      amount: order.totalAmount,
+      amount: gatewayAmount,
       currency: "INR",
       status: "PENDING",
     },
@@ -118,7 +131,7 @@ export async function startPayment(orderId: string, requestingUserId: string): P
       paymentId,
       providerOrderId,
       idempotencyKey,
-      amount: Number(order.totalAmount),
+      amount: gatewayAmount,
       currency: "INR",
       customer,
       returnUrl: buildReturnUrl(),
@@ -391,6 +404,14 @@ export async function handleWebhook(args: {
 // through the gateway — a single atomic DB write, so this either fully
 // succeeds (synchronously SUCCEEDED) or throws before anything is written.
 // There's no provider round-trip to fail mid-flight anymore.
+//
+// An order can be funded from two independent pools now that checkout
+// supports paying partly from the wallet and partly via the gateway (e.g.
+// ₹200 wallet + ₹300 Cashfree on a ₹500 order): a gateway Payment row and/or
+// a wallet debit WalletTransaction (type ORDER_PAYMENT) against this orderId.
+// Both pools track their own "already refunded" total so a refund can draw
+// from either or both without double-refunding or under-refunding either
+// side — see the regression tests in __tests__/service.test.ts.
 export async function refundPayment(
   orderId: string,
   amount: number,
@@ -400,78 +421,96 @@ export async function refundPayment(
     throw new RefundNotAllowedError("Refund amount must be greater than 0");
   }
 
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) {
+    throw new RefundNotAllowedError("Order not found");
+  }
+
+  // Included regardless of status (not just SUCCEEDED/PARTIALLY_REFUNDED) so
+  // a fully REFUNDED payment still contributes its true gatewayPool/refunded
+  // totals below — otherwise a split order whose gateway half was refunded
+  // first would look like it never had a Payment at all, and the wallet-debit
+  // pool's "already refunded" math would double-count the gateway refund.
   const payment = await prisma.payment.findFirst({
-    where: { orderId, purpose: "ORDER_PAYMENT", status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED"] } },
-    include: { refunds: true, order: true },
+    where: {
+      orderId,
+      purpose: "ORDER_PAYMENT",
+      status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED", "REFUNDED"] },
+    },
+    include: { refunds: true },
   });
 
-  if (payment) {
-    const alreadyRefunded = payment.refunds
-      .filter((r) => REFUND_OPEN_STATUSES.includes(r.status))
-      .reduce((sum, r) => sum + Number(r.amount), 0);
-    const refundable = Number(payment.amount) - alreadyRefunded;
+  const walletDebit = await prisma.walletTransaction.aggregate({
+    where: { orderId, type: "ORDER_PAYMENT" },
+    _sum: { amount: true },
+  });
 
-    if (amount > refundable + 0.01) {
-      throw new RefundNotAllowedError(
-        `Refund amount must be between 0.01 and ${refundable.toFixed(2)} (already refunded: ${alreadyRefunded.toFixed(2)})`,
-      );
-    }
+  const gatewayPool = payment ? Number(payment.amount) : 0;
+  const walletDebitPool = Math.abs(Number(walletDebit._sum.amount ?? 0));
 
-    return prisma.$transaction(async (tx) => {
-      // Gateway-funded order ("order" is always set when purpose is
-      // ORDER_PAYMENT) — credit the wallet instead of calling the provider.
-      const walletTransaction = await creditWalletForRefund(
-        tx,
-        payment.order!.userId,
-        orderId,
-        amount,
-        reason,
-      );
-      const refund = await tx.refund.create({
+  if (gatewayPool === 0 && walletDebitPool === 0) {
+    throw new RefundNotAllowedError("No successful payment found for this order");
+  }
+
+  const gatewayRefundedSoFar = payment
+    ? payment.refunds
+        .filter((r) => REFUND_OPEN_STATUSES.includes(r.status))
+        .reduce((sum, r) => sum + Number(r.amount), 0)
+    : 0;
+
+  const priorRefunds = await prisma.walletTransaction.aggregate({
+    where: { orderId, type: "REFUND" },
+    _sum: { amount: true },
+  });
+  // Every refund credit — from either pool — lands here, so subtracting the
+  // Refund-table total (gateway pool only) isolates what came from the
+  // wallet-debit pool specifically.
+  const walletDebitRefundedSoFar = Number(priorRefunds._sum.amount ?? 0) - gatewayRefundedSoFar;
+
+  const gatewayRefundable = Math.max(gatewayPool - gatewayRefundedSoFar, 0);
+  const walletDebitRefundable = Math.max(walletDebitPool - walletDebitRefundedSoFar, 0);
+  const totalRefundable = gatewayRefundable + walletDebitRefundable;
+
+  if (amount > totalRefundable + 0.01) {
+    const alreadyRefunded = gatewayPool + walletDebitPool - totalRefundable;
+    throw new RefundNotAllowedError(
+      `Refund amount must be between 0.01 and ${totalRefundable.toFixed(2)} (already refunded: ${alreadyRefunded.toFixed(2)})`,
+    );
+  }
+
+  // Gateway pool first, wallet-debit pool for the rest — the split is
+  // bookkeeping only (which pool's "already refunded" counter to decrement);
+  // both ultimately just credit the customer's wallet.
+  const fromGateway = Math.min(amount, gatewayRefundable);
+  const fromWalletDebit = amount - fromGateway;
+
+  return prisma.$transaction(async (tx) => {
+    let gatewayRefund = null;
+
+    if (fromGateway > 0 && payment) {
+      const walletTransaction = await creditWalletForRefund(tx, order.userId, orderId, fromGateway, reason);
+      gatewayRefund = await tx.refund.create({
         data: {
           paymentId: payment.id,
           refundRef: `rfd_${randomUUID()}`,
-          amount,
+          amount: fromGateway,
           reason,
           status: "SUCCEEDED",
           walletTransactionId: walletTransaction.id,
         },
       });
 
-      const totalRefunded = alreadyRefunded + amount;
       const paymentStatus =
-        totalRefunded >= Number(payment.amount) - 0.01 ? "REFUNDED" : "PARTIALLY_REFUNDED";
+        gatewayRefundedSoFar + fromGateway >= gatewayPool - 0.01 ? "REFUNDED" : "PARTIALLY_REFUNDED";
       await tx.payment.update({ where: { id: payment.id }, data: { status: paymentStatus } });
+    }
 
-      return refund;
-    });
-  }
+    if (fromWalletDebit > 0) {
+      await creditWalletForRefund(tx, order.userId, orderId, fromWalletDebit, reason);
+    }
 
-  // No gateway Payment exists for this order — it must have been paid
-  // entirely from the wallet. Confirm that's actually the case (don't let an
-  // unpaid order be "refunded") via the original debit's WalletTransaction.
-  const orderDebit = await prisma.walletTransaction.findFirst({
-    where: { orderId, type: "ORDER_PAYMENT" },
+    return gatewayRefund ?? { orderId, amount, reason };
   });
-  const order = orderDebit ? await prisma.order.findUnique({ where: { id: orderId } }) : null;
-  if (!orderDebit || !order) {
-    throw new RefundNotAllowedError("No successful payment found for this order");
-  }
-
-  const priorWalletRefunds = await prisma.walletTransaction.aggregate({
-    where: { orderId, type: "REFUND" },
-    _sum: { amount: true },
-  });
-  const alreadyRefunded = Number(priorWalletRefunds._sum.amount ?? 0);
-  const refundable = Number(order.totalAmount) - alreadyRefunded;
-
-  if (amount > refundable + 0.01) {
-    throw new RefundNotAllowedError(
-      `Refund amount must be between 0.01 and ${refundable.toFixed(2)} (already refunded: ${alreadyRefunded.toFixed(2)})`,
-    );
-  }
-
-  return prisma.$transaction((tx) => creditWalletForRefund(tx, order.userId, orderId, amount, reason));
 }
 
 export { WebhookSignatureError };

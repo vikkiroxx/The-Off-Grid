@@ -187,11 +187,12 @@ export default function AdminOrderDetailPage({ params }: { params: Promise<{ id:
         <p className="font-mono text-xs tracking-widest text-foreground-muted uppercase">
           Payment
         </p>
-        {!order.payments || order.payments.length === 0 ? (
+        {(!order.payments || order.payments.length === 0) &&
+        (!order.walletTransactions || order.walletTransactions.length === 0) ? (
           <p className="mt-3 font-mono text-sm text-foreground-muted">
             No payment attempts recorded for this order.
           </p>
-        ) : (
+        ) : order.payments && order.payments.length > 0 ? (
           <ul className="mt-3 space-y-2">
             {order.payments.map((payment) => (
               <li
@@ -232,9 +233,9 @@ export default function AdminOrderDetailPage({ params }: { params: Promise<{ id:
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
 
-        {!order.payments?.length && order.walletTransactions && order.walletTransactions.length > 0 && (
+        {order.walletTransactions && order.walletTransactions.length > 0 && (
           <ul className="mt-3 space-y-1">
             {order.walletTransactions.map((txn) => (
               <li key={txn.id} className="font-mono text-xs text-foreground-muted">

@@ -12,6 +12,7 @@ interface CartContextValue {
   loading: boolean;
   addToCart: (variantId: string, quantity?: number) => Promise<void>;
   updateQuantity: (itemId: string, quantity: number) => Promise<void>;
+  changeVariant: (itemId: string, variantId: string) => Promise<void>;
   removeItem: (itemId: string) => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -55,6 +56,11 @@ export function CartProvider({ children }: { children: ReactNode }) {
     await refresh();
   }
 
+  async function changeVariant(itemId: string, variantId: string) {
+    await api.patch<CartItem>(`/cart/${itemId}`, { variantId });
+    await refresh();
+  }
+
   async function removeItem(itemId: string) {
     await api.delete(`/cart/${itemId}`);
     await refresh();
@@ -64,7 +70,7 @@ export function CartProvider({ children }: { children: ReactNode }) {
 
   return (
     <CartContext.Provider
-      value={{ items, count, loading, addToCart, updateQuantity, removeItem, refresh }}
+      value={{ items, count, loading, addToCart, updateQuantity, changeVariant, removeItem, refresh }}
     >
       {children}
     </CartContext.Provider>

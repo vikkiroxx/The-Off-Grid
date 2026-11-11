@@ -13,9 +13,8 @@ import { Order, Wallet } from "@/types";
 interface CheckoutResponse extends Order {
   payment: { providerOrderId: string; sessionId: string | null } | null;
   paymentError?: string;
+  walletAmountUsed?: number;
 }
-
-type PaymentMethod = "CASHFREE" | "WALLET";
 
 function unitPrice(item: { variant: { priceDelta: string; product: { price: string } } }) {
   return Number(item.variant.product.price) + Number(item.variant.priceDelta);
@@ -27,17 +26,19 @@ export default function CartPage() {
     items,
     loading: cartLoading,
     updateQuantity,
+    changeVariant,
     removeItem,
     refresh: refreshCart,
   } = useCart();
   const router = useRouter();
 
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASHFREE");
+  const [useWalletBalance, setUseWalletBalance] = useState(false);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [placing, setPlacing] = useState(false);
   const [placeError, setPlaceError] = useState<string | null>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
+  const [itemError, setItemError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -84,6 +85,18 @@ export default function CartPage() {
     }
   }
 
+  async function handleVariantChange(itemId: string, variantId: string) {
+    setPendingItemId(itemId);
+    setItemError(null);
+    try {
+      await changeVariant(itemId, variantId);
+    } catch (err) {
+      setItemError((err as Error).message);
+    } finally {
+      setPendingItemId(null);
+    }
+  }
+
   async function handleRemove(itemId: string) {
     setPendingItemId(itemId);
     try {
@@ -109,7 +122,7 @@ export default function CartPage() {
           pincode: address.pincode,
           phone: address.phone,
         },
-        paymentMethod,
+        useWalletBalance,
       });
       // The order is placed (and stock/cart already updated server-side)
       // regardless of what happens next — refresh the cart either way.
@@ -138,17 +151,19 @@ export default function CartPage() {
   }
 
   const subtotal = items.reduce((sum, item) => sum + unitPrice(item) * item.quantity, 0);
-  const walletUsable = Boolean(wallet) && Number(wallet?.balance ?? 0) >= subtotal;
+  const walletBalance = Number(wallet?.balance ?? 0);
+  const walletApplied = useWalletBalance ? Math.min(walletBalance, subtotal) : 0;
+  const cashfreeRemainder = subtotal - walletApplied;
 
   useEffect(() => {
-    if (paymentMethod === "WALLET" && !walletUsable) {
+    if (useWalletBalance && walletBalance <= 0) {
       // Falling back the selection when the wallet option becomes unusable
-      // (e.g. cart total changed), not a derived value.
+      // (e.g. balance spent elsewhere), not a derived value.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPaymentMethod("CASHFREE");
+      setUseWalletBalance(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletUsable]);
+  }, [walletBalance]);
 
   if (authLoading || !user) {
     return (
@@ -185,6 +200,7 @@ export default function CartPage() {
         </div>
       ) : (
         <>
+          {itemError && <p className="font-mono text-xs text-danger">{itemError}</p>}
           <ul className="space-y-3">
             {items.map((item) => (
               <li
@@ -205,9 +221,30 @@ export default function CartPage() {
                 <div className="flex flex-1 flex-col justify-between">
                   <div>
                     <p className="text-sm text-foreground">{item.variant.product.name}</p>
-                    <p className="font-mono text-xs text-foreground-muted uppercase">
-                      {item.variant.size} / {item.variant.color}
-                    </p>
+                    {item.variant.product.variants.length > 1 ? (
+                      <select
+                        aria-label="Size / color"
+                        value={item.variant.id}
+                        disabled={pendingItemId === item.id}
+                        onChange={(e) => handleVariantChange(item.id, e.target.value)}
+                        className="mt-1 rounded-[var(--radius-card)] border border-border bg-background-elevated px-2 py-1 font-mono text-xs text-foreground-muted uppercase disabled:opacity-50"
+                      >
+                        {item.variant.product.variants.map((v) => (
+                          <option
+                            key={v.id}
+                            value={v.id}
+                            disabled={v.stock === 0 && v.id !== item.variant.id}
+                          >
+                            {v.size} / {v.color}
+                            {v.stock === 0 ? " · Sold out" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="font-mono text-xs text-foreground-muted uppercase">
+                        {item.variant.size} / {item.variant.color}
+                      </p>
+                    )}
                     <p className="mt-1 font-mono text-sm text-foreground">
                       ₹{unitPrice(item).toFixed(2)}
                     </p>
@@ -304,40 +341,38 @@ export default function CartPage() {
               <p className="font-mono text-xs tracking-widest text-foreground-muted uppercase">
                 Pay with
               </p>
-              <ul className="mt-2 space-y-2">
-                <li>
-                  <label className="flex cursor-pointer items-center justify-between rounded-[var(--radius-card)] border border-border px-4 py-3 text-sm text-foreground-muted has-[:checked]:border-accent has-[:checked]:text-foreground">
-                    <span className="flex items-center gap-3">
-                      <input
-                        type="radio"
-                        name="paymentMethod"
-                        checked={paymentMethod === "CASHFREE"}
-                        onChange={() => setPaymentMethod("CASHFREE")}
-                        className="accent-accent"
-                      />
-                      Cashfree
-                    </span>
-                  </label>
-                </li>
-                <li>
-                  <label className="flex cursor-pointer items-center justify-between rounded-[var(--radius-card)] border border-border px-4 py-3 text-sm text-foreground-muted has-[:checked]:border-accent has-[:checked]:text-foreground has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
-                    <span className="flex items-center gap-3">
-                      <input
-                        type="radio"
-                        name="paymentMethod"
-                        checked={paymentMethod === "WALLET"}
-                        disabled={!walletUsable}
-                        onChange={() => setPaymentMethod("WALLET")}
-                        className="accent-accent"
-                      />
-                      Wallet
-                    </span>
-                    <span className="font-mono text-xs">
-                      ₹{wallet ? Number(wallet.balance).toFixed(2) : "—"}
-                    </span>
-                  </label>
-                </li>
-              </ul>
+              <label className="mt-2 flex cursor-pointer items-center justify-between rounded-[var(--radius-card)] border border-border px-4 py-3 text-sm text-foreground-muted has-[:checked]:border-accent has-[:checked]:text-foreground has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
+                <span className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={useWalletBalance}
+                    disabled={walletBalance <= 0}
+                    onChange={(e) => setUseWalletBalance(e.target.checked)}
+                    className="accent-accent"
+                  />
+                  Use wallet balance
+                </span>
+                <span className="font-mono text-xs">
+                  ₹{wallet ? walletBalance.toFixed(2) : "—"}
+                </span>
+              </label>
+
+              <div className="mt-3 space-y-1 font-mono text-xs">
+                {walletApplied > 0 && (
+                  <div className="flex items-center justify-between text-foreground-muted">
+                    <span>From wallet</span>
+                    <span className="text-foreground">−₹{walletApplied.toFixed(2)}</span>
+                  </div>
+                )}
+                {cashfreeRemainder > 0 ? (
+                  <div className="flex items-center justify-between text-foreground-muted">
+                    <span>Via Cashfree</span>
+                    <span className="text-foreground">₹{cashfreeRemainder.toFixed(2)}</span>
+                  </div>
+                ) : walletApplied > 0 ? (
+                  <p className="text-accent">Fully covered by your wallet balance.</p>
+                ) : null}
+              </div>
             </div>
 
             {placeError && <p className="mt-4 font-mono text-xs text-danger">{placeError}</p>}

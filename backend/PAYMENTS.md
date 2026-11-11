@@ -140,18 +140,35 @@ for free, instead of reimplementing it for a second async-gateway flow:
   user's* pending top-up at once, since they all share `orderId: null`. See
   the regression test in `__tests__/service.test.ts` ("does not cancel
   another user's pending top-up when one succeeds").
-- Paying an order *from* the wallet (`createOrder` with `paymentMethod:
-  "WALLET"`) never produces a `Payment` row at all — it's a synchronous
-  ledger debit inside the existing order-creation transaction
-  (`backend/src/wallet/service.ts#debitWalletForOrder`), not a gateway
-  attempt. `PaymentProvider` deliberately has no `WALLET` value for this
-  reason.
-- Refunding a wallet-paid order (no `Payment` row to attach a `Refund` to)
-  is a separate branch in `refundPayment()`: it validates against
-  `Order.totalAmount` minus prior wallet refunds for that order (via the
-  original debit's `WalletTransaction`, type `ORDER_PAYMENT`) and credits the
-  wallet directly — no `Refund` row, the `WalletTransaction` is the audit
-  record.
+- **Split wallet + gateway checkout.** `createOrder` takes `useWalletBalance:
+  boolean` (not a `paymentMethod` enum). When true, it debits
+  `min(wallet.balance, order.totalAmount)` from the wallet synchronously
+  inside the order-creation transaction — exactly the wallet-only path below,
+  just for a partial amount — and only starts a gateway `Payment` for
+  whatever remains. A balance that covers the whole order skips the gateway
+  leg entirely (order goes straight to `PAID`, same as before); a balance of
+  zero behaves exactly like a plain gateway checkout. `startPayment()` nets
+  out any existing wallet debit for the order (via a `WalletTransaction`
+  aggregate on `orderId` + `type: "ORDER_PAYMENT"`) so the gateway `Payment`
+  it creates is sized at the remainder, never the full total — this means an
+  order can end up funded by *both* a wallet debit and a gateway `Payment`
+  row simultaneously. `PaymentProvider` still has no `WALLET` value; a
+  wallet-only order (remainder `<= 0`) produces zero `Payment` rows, same as
+  always.
+- **Refunds always land in the wallet**, and `refundPayment()` now tracks two
+  independent refundable pools per order — the gateway `Payment`'s amount
+  (via its `Refund` rows) and the wallet-debited amount (via
+  `WalletTransaction` rows) — and draws from the gateway pool first, then the
+  wallet-debit pool, for whatever single refund amount the admin requests.
+  The wallet-debit pool's "already refunded" total is derived as *all*
+  `REFUND`-type `WalletTransaction`s for the order minus the ones already
+  accounted for by `Refund` rows, rather than its own counter, since every
+  refund — from either pool — credits the wallet the same way and only the
+  gateway-pool portion gets its own `Refund` row. A refund that draws from
+  only the wallet-debit pool (no `Payment` row touched at all) is
+  unchanged from before: no `Refund` row, the `WalletTransaction` is the
+  audit record. See the "split wallet + gateway order" tests in
+  `__tests__/service.test.ts` for the two-pool math worked through directly.
 - Wallet balance mutations (`backend/src/wallet/service.ts`) all go through
   one guarded `UPDATE` (`WHERE balance >= amount` for debits, in the same
   statement as the increment) — the wallet analogue of the optimistic
