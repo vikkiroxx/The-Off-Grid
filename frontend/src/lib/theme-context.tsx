@@ -23,8 +23,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    // Read-after-mount is intentional here: the server always renders "dark"
+    // (it has no access to the bootstrap script's DOM mutation), so the real
+    // theme can only be read once mounted.
     const current = document.documentElement.dataset.theme;
-    if (current === "light" || current === "dark") setTheme(current);
+    if (current === "light" || current === "dark") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTheme(current);
+    }
     setMounted(true);
   }, []);
 
