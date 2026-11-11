@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { href: "/admin/products", label: "Products", exact: false },
   { href: "/admin/categories", label: "Categories", exact: false },
   { href: "/admin/orders", label: "Orders", exact: false },
+  { href: "/admin/wallets", label: "Wallets", exact: false },
   { href: "/admin/messages", label: "Messages", exact: false },
 ];
 

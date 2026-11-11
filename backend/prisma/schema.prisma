@@ -37,6 +37,8 @@ model User {
   addresses Address[]
   orders    Order[]
   cart      CartItem[]
+  wishlist  WishlistItem[]
+  wallet    Wallet?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -99,6 +101,7 @@ model Product {
   categoryId  String
   category    Category  @relation(fields: [categoryId], references: [id])
   variants    Variant[]
+  wishlistedBy WishlistItem[]
   isActive    Boolean   @default(true)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -128,12 +131,24 @@ model CartItem {
   @@unique([userId, variantId])
 }
 
+model WishlistItem {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
 model Order {
   id          String      @id @default(uuid())
   userId      String
   user        User        @relation(fields: [userId], references: [id])
   items       OrderItem[]
   payments    Payment[]
+  walletTransactions WalletTransaction[]
   status      OrderStatus @default(PENDING)
   totalAmount Decimal     @db.Decimal(10, 2)
   paymentId   String?
@@ -159,6 +174,11 @@ enum PaymentProvider {
   CASHFREE
 }
 
+enum PaymentPurpose {
+  ORDER_PAYMENT
+  WALLET_TOPUP
+}
+
 enum PaymentStatus {
   PENDING
   PROCESSING
@@ -179,10 +199,18 @@ enum RefundStatus {
 // One row per payment *attempt*. An Order can accumulate several (e.g. the
 // customer abandons a checkout and retries) — at most one should ever reach
 // SUCCEEDED, enforced in application logic, not just by this schema.
+// A WALLET_TOPUP payment has no Order at all — it funds a WalletTransaction
+// instead (see walletTransactionId below).
 model Payment {
   id    String          @id @default(uuid())
-  order Order           @relation(fields: [orderId], references: [id])
-  orderId String
+  order Order?          @relation(fields: [orderId], references: [id])
+  orderId String?
+
+  purpose PaymentPurpose @default(ORDER_PAYMENT)
+
+  // Set only when purpose = WALLET_TOPUP — the ledger row this attempt funds.
+  walletTransactionId String?            @unique
+  walletTransaction    WalletTransaction? @relation(fields: [walletTransactionId], references: [id])
 
   provider          PaymentProvider
   // The order_id *we* sent the provider for this attempt (unique per provider,
@@ -232,6 +260,11 @@ model Refund {
   status RefundStatus @default(PENDING)
   reason String?
 
+  // Set once the credit actually lands in the customer's wallet (refunds now
+  // always pay out to the wallet rather than back through the provider).
+  walletTransactionId String?            @unique
+  walletTransaction    WalletTransaction? @relation(fields: [walletTransactionId], references: [id])
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -250,4 +283,53 @@ model PaymentWebhookEvent {
   receivedAt DateTime @default(now())
 
   @@unique([provider, bodyHash])
+}
+
+enum WalletTransactionType {
+  TOPUP
+  ORDER_PAYMENT
+  REFUND
+  ADMIN_CREDIT
+  ADMIN_DEBIT
+}
+
+enum WalletTransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Wallet {
+  id           String               @id @default(uuid())
+  userId       String               @unique
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance      Decimal              @default(0) @db.Decimal(10, 2)
+  transactions WalletTransaction[]
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+}
+
+// Append-only ledger. amount is signed (credits positive, debits negative);
+// balanceAfter is a snapshot of Wallet.balance written atomically with the
+// same update that applied this entry, so history never needs replaying.
+model WalletTransaction {
+  id           String                  @id @default(uuid())
+  walletId     String
+  wallet       Wallet                  @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  type         WalletTransactionType
+  status       WalletTransactionStatus @default(PENDING)
+  amount       Decimal                 @db.Decimal(10, 2)
+  balanceAfter Decimal                 @db.Decimal(10, 2)
+  reason       String?
+  orderId      String?
+  order        Order?                  @relation(fields: [orderId], references: [id])
+  payment      Payment?
+  refund       Refund?
+  adminId      String?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+
+  @@index([walletId])
+  @@index([orderId])
 }

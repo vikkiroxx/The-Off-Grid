@@ -8,6 +8,7 @@ import {
   reconcilePaymentStatus,
   refundPayment,
 } from "@/payments/service";
+import { adminAdjustWallet, debitWalletForOrder, InsufficientWalletBalanceError } from "@/wallet/service";
 
 // A minimal in-memory stand-in for the slice of Prisma this module uses.
 // Real end-to-end behavior (actual Postgres, actual Cashfree sandbox calls)
@@ -22,7 +23,9 @@ interface FakeOrder {
 }
 interface FakePayment {
   id: string;
-  orderId: string;
+  orderId: string | null;
+  purpose?: string;
+  walletTransactionId?: string | null;
   provider: string;
   providerOrderId: string;
   providerPaymentId: string | null;
@@ -33,6 +36,22 @@ interface FakePayment {
   sessionId: string | null;
   failureMessage?: string | null;
 }
+interface FakeWallet {
+  id: string;
+  userId: string;
+  balance: number;
+}
+interface FakeWalletTransaction {
+  id: string;
+  walletId: string;
+  type: string;
+  status: string;
+  amount: number;
+  balanceAfter: number;
+  reason?: string | null;
+  orderId?: string | null;
+  adminId?: string | null;
+}
 
 // vi.mock() factories are hoisted above *all* other top-level code in this
 // file, including plain `const`/`function` declarations — so the fake DB
@@ -41,8 +60,10 @@ interface FakePayment {
 function createFakeDb() {
   const orders = new Map<string, FakeOrder>();
   const payments = new Map<string, FakePayment>();
-  const refunds = new Map<string, { id: string; paymentId: string; amount: number; status: string }>();
+  const refunds = new Map<string, { id: string; paymentId: string; amount: number; status: string; walletTransactionId?: string | null }>();
   const webhookEvents = new Map<string, { provider: string; paymentId: string | null; type: string; bodyHash: string }>();
+  const wallets = new Map<string, FakeWallet>();
+  const walletTransactions = new Map<string, FakeWalletTransaction>();
 
   const client: Record<string, unknown> = {
     order: {
@@ -85,7 +106,9 @@ function createFakeDb() {
               null;
           }
           if (!found) return null;
-          if (include?.order) return { ...found, order: orders.get(found.orderId) ?? null };
+          if (include?.order) {
+            return { ...found, order: found.orderId ? orders.get(found.orderId) ?? null : null };
+          }
           return found;
         },
       ),
@@ -94,16 +117,23 @@ function createFakeDb() {
         if (!p) throw new Error("Payment not found");
         return p;
       }),
-      findFirst: vi.fn(async ({ where }: { where: { orderId: string; status?: { in: string[] } } }) => {
+      findFirst: vi.fn(async ({ where }: { where: { orderId: string; purpose?: string; status?: { in: string[] } } }) => {
         const match = [...payments.values()].find(
-          (p) => p.orderId === where.orderId && (!where.status || where.status.in.includes(p.status)),
+          (p) =>
+            p.orderId === where.orderId &&
+            (!where.purpose || p.purpose === where.purpose) &&
+            (!where.status || where.status.in.includes(p.status)),
         );
         return match
-          ? { ...match, refunds: [...refunds.values()].filter((r) => r.paymentId === match.id) }
+          ? {
+              ...match,
+              refunds: [...refunds.values()].filter((r) => r.paymentId === match.id),
+              order: match.orderId ? orders.get(match.orderId) ?? null : null,
+            }
           : null;
       }),
       create: vi.fn(async ({ data }: { data: FakePayment }) => {
-        const p = { ...data };
+        const p = { purpose: "ORDER_PAYMENT", ...data };
         payments.set(p.id, p);
         return p;
       }),
@@ -156,10 +186,98 @@ function createFakeDb() {
         return data;
       }),
     },
+    wallet: {
+      upsert: vi.fn(async ({ where, create }: { where: { userId: string }; create: { userId: string; balance: number } }) => {
+        let w = [...wallets.values()].find((x) => x.userId === where.userId);
+        if (!w) {
+          w = { id: `wallet_${wallets.size + 1}`, userId: where.userId, balance: create.balance ?? 0 };
+          wallets.set(w.id, w);
+        }
+        return w;
+      }),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; balance?: { gte: number } };
+          data: { balance: { increment: number } };
+        }) => {
+          const w = wallets.get(where.id);
+          if (!w) return { count: 0 };
+          if (where.balance?.gte !== undefined && w.balance < where.balance.gte) return { count: 0 };
+          w.balance += data.balance.increment;
+          return { count: 1 };
+        },
+      ),
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const w = wallets.get(where.id);
+        if (!w) throw new Error("Wallet not found");
+        return w;
+      }),
+      update: vi.fn(
+        async ({ where, data }: { where: { id: string }; data: { balance: { increment: number } } }) => {
+          const w = wallets.get(where.id)!;
+          w.balance += data.balance.increment;
+          return w;
+        },
+      ),
+    },
+    walletTransaction: {
+      create: vi.fn(async ({ data }: { data: Omit<FakeWalletTransaction, "id"> }) => {
+        const wt = { id: `wt_${walletTransactions.size + 1}`, ...data };
+        walletTransactions.set(wt.id, wt);
+        return wt;
+      }),
+      findUniqueOrThrow: vi.fn(async ({ where }: { where: { id: string } }) => {
+        const wt = walletTransactions.get(where.id);
+        if (!wt) throw new Error("WalletTransaction not found");
+        return wt;
+      }),
+      updateMany: vi.fn(
+        async ({
+          where,
+          data,
+        }: {
+          where: { id: string; status?: string };
+          data: Partial<FakeWalletTransaction>;
+        }) => {
+          const wt = walletTransactions.get(where.id);
+          if (!wt) return { count: 0 };
+          if (where.status && wt.status !== where.status) return { count: 0 };
+          Object.assign(wt, data);
+          return { count: 1 };
+        },
+      ),
+      update: vi.fn(
+        async ({ where, data }: { where: { id: string }; data: Partial<FakeWalletTransaction> }) => {
+          const wt = walletTransactions.get(where.id)!;
+          Object.assign(wt, data);
+          return wt;
+        },
+      ),
+      findFirst: vi.fn(async ({ where }: { where: { orderId?: string; type?: string } }) => {
+        return (
+          [...walletTransactions.values()].find(
+            (wt) =>
+              (!where.orderId || wt.orderId === where.orderId) &&
+              (!where.type || wt.type === where.type),
+          ) ?? null
+        );
+      }),
+      aggregate: vi.fn(async ({ where }: { where: { orderId?: string; type?: string } }) => {
+        const matches = [...walletTransactions.values()].filter(
+          (wt) =>
+            (!where.orderId || wt.orderId === where.orderId) &&
+            (!where.type || wt.type === where.type),
+        );
+        return { _sum: { amount: matches.length ? matches.reduce((s, wt) => s + wt.amount, 0) : null } };
+      }),
+    },
     $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(client)),
   };
 
-  return { client, orders, payments, refunds, webhookEvents };
+  return { client, orders, payments, refunds, webhookEvents, wallets, walletTransactions };
 }
 
 const db = vi.hoisted(() => createFakeDb());
@@ -192,6 +310,7 @@ function seedOrderWithPayment(opts: {
   db.payments.set(opts.paymentId, {
     id: opts.paymentId,
     orderId: opts.orderId,
+    purpose: "ORDER_PAYMENT",
     provider: "CASHFREE",
     providerOrderId: `pay_${opts.paymentId}`,
     providerPaymentId: null,
@@ -209,6 +328,8 @@ describe("payments service", () => {
     db.payments.clear();
     db.refunds.clear();
     db.webhookEvents.clear();
+    db.wallets.clear();
+    db.walletTransactions.clear();
     vi.clearAllMocks();
   });
 
@@ -382,6 +503,166 @@ describe("payments service", () => {
 
       // payment is now PARTIALLY_REFUNDED with 300 already refunded; only 200 left
       await expect(refundPayment("o1", 201, undefined)).rejects.toThrow(/must be between/);
+    });
+
+    it("credits the wallet instead of calling the provider for a gateway-funded order", async () => {
+      seedOrderWithPayment({ orderId: "o1", paymentId: "p1", amount: 500, status: "SUCCEEDED", orderStatus: "PAID" });
+
+      await refundPayment("o1", 200, "customer request");
+
+      expect(db.payments.get("p1")!.status).toBe("PARTIALLY_REFUNDED");
+      expect(mockProvider.refundPayment).not.toHaveBeenCalled();
+      const wallet = [...db.wallets.values()].find((w) => w.userId === "user1");
+      expect(wallet?.balance).toBe(200);
+    });
+
+    it("credits the wallet for an order paid entirely from the wallet (no Payment row)", async () => {
+      db.orders.set("o2", { id: "o2", userId: "user2", status: "PAID", totalAmount: 300, shippingAddress: {} });
+      db.walletTransactions.set("debit1", {
+        id: "debit1",
+        walletId: "wallet_placeholder",
+        type: "ORDER_PAYMENT",
+        status: "COMPLETED",
+        amount: -300,
+        balanceAfter: 0,
+        orderId: "o2",
+      });
+
+      await refundPayment("o2", 100, "goodwill");
+
+      const wallet = [...db.wallets.values()].find((w) => w.userId === "user2");
+      expect(wallet?.balance).toBe(100);
+
+      // only 200 remains refundable (300 total - 100 already refunded)
+      await expect(refundPayment("o2", 201, undefined)).rejects.toThrow(/must be between/);
+    });
+
+    it("rejects a refund for an order that was never paid at all", async () => {
+      db.orders.set("o3", { id: "o3", userId: "user3", status: "PENDING", totalAmount: 100, shippingAddress: {} });
+      await expect(refundPayment("o3", 50, undefined)).rejects.toBeInstanceOf(RefundNotAllowedError);
+    });
+  });
+
+  describe("wallet top-ups", () => {
+    function seedTopUp(opts: { paymentId: string; userId: string; amount: number; status?: string }) {
+      const wallet: FakeWallet = { id: `wallet_${opts.userId}`, userId: opts.userId, balance: 0 };
+      db.wallets.set(wallet.id, wallet);
+      const wt: FakeWalletTransaction = {
+        id: `wt_${opts.paymentId}`,
+        walletId: wallet.id,
+        type: "TOPUP",
+        status: "PENDING",
+        amount: opts.amount,
+        balanceAfter: wallet.balance,
+      };
+      db.walletTransactions.set(wt.id, wt);
+      db.payments.set(opts.paymentId, {
+        id: opts.paymentId,
+        orderId: null,
+        purpose: "WALLET_TOPUP",
+        walletTransactionId: wt.id,
+        provider: "CASHFREE",
+        providerOrderId: `topup_${opts.paymentId}`,
+        providerPaymentId: null,
+        amount: opts.amount,
+        currency: "INR",
+        status: opts.status ?? "PENDING",
+        idempotencyKey: `idem_${opts.paymentId}`,
+        sessionId: null,
+      });
+      return { wallet, wt };
+    }
+
+    it("credits the wallet on a successful top-up webhook", async () => {
+      const { wallet } = seedTopUp({ paymentId: "t1", userId: "user1", amount: 200 });
+      mockProvider.verifyWebhook.mockResolvedValue({
+        rawType: "PAYMENT_SUCCESS_WEBHOOK",
+        providerOrderId: "topup_t1",
+        providerPaymentId: "cfp1",
+        status: "SUCCEEDED",
+        amount: 200,
+        currency: "INR",
+      });
+
+      await handleWebhook({ rawBody: "{}", signature: "sig", timestamp: "1", bodyHash: "hash-topup" });
+
+      expect(db.payments.get("t1")!.status).toBe("SUCCEEDED");
+      expect(db.wallets.get(wallet.id)!.balance).toBe(200);
+    });
+
+    // Regression test for the one genuinely dangerous interaction between
+    // ORDER_PAYMENT and WALLET_TOPUP sharing the Payment table: the
+    // sibling-cancellation query in applyVerifiedResult must be scoped to
+    // purpose === ORDER_PAYMENT, or it matches every other user's pending
+    // top-up (all have orderId === null) and cancels them all.
+    it("does not cancel another user's pending top-up when one succeeds", async () => {
+      seedTopUp({ paymentId: "t1", userId: "userA", amount: 100 });
+      seedTopUp({ paymentId: "t2", userId: "userB", amount: 150 });
+
+      mockProvider.verifyWebhook.mockResolvedValue({
+        rawType: "PAYMENT_SUCCESS_WEBHOOK",
+        providerOrderId: "topup_t1",
+        providerPaymentId: "cfp1",
+        status: "SUCCEEDED",
+        amount: 100,
+        currency: "INR",
+      });
+
+      await handleWebhook({ rawBody: "{}", signature: "sig", timestamp: "1", bodyHash: "hash-a" });
+
+      expect(db.payments.get("t1")!.status).toBe("SUCCEEDED");
+      expect(db.payments.get("t2")!.status).toBe("PENDING");
+    });
+
+    it("marks the top-up FAILED without touching the balance on a failed webhook", async () => {
+      const { wallet } = seedTopUp({ paymentId: "t1", userId: "user1", amount: 200 });
+      mockProvider.verifyWebhook.mockResolvedValue({
+        rawType: "PAYMENT_FAILED_WEBHOOK",
+        providerOrderId: "topup_t1",
+        providerPaymentId: "cfp1",
+        status: "FAILED",
+        amount: 200,
+        currency: "INR",
+      });
+
+      await handleWebhook({ rawBody: "{}", signature: "sig", timestamp: "1", bodyHash: "hash-fail" });
+
+      expect(db.payments.get("t1")!.status).toBe("FAILED");
+      expect(db.walletTransactions.get("wt_t1")!.status).toBe("FAILED");
+      expect(db.wallets.get(wallet.id)!.balance).toBe(0);
+    });
+  });
+
+  describe("wallet debits (checkout)", () => {
+    it("rejects a debit exceeding the current balance, leaving the balance unchanged", async () => {
+      db.wallets.set("w1", { id: "w1", userId: "user1", balance: 100 });
+      await expect(
+        debitWalletForOrder(db.client as unknown as Parameters<typeof debitWalletForOrder>[0], "user1", "o1", 150),
+      ).rejects.toBeInstanceOf(InsufficientWalletBalanceError);
+      expect(db.wallets.get("w1")!.balance).toBe(100);
+    });
+
+    it("debits exactly the order amount on success", async () => {
+      db.wallets.set("w1", { id: "w1", userId: "user1", balance: 500 });
+      await debitWalletForOrder(db.client as unknown as Parameters<typeof debitWalletForOrder>[0], "user1", "o1", 200);
+      expect(db.wallets.get("w1")!.balance).toBe(300);
+    });
+  });
+
+  describe("adminAdjustWallet", () => {
+    it("rejects an ADMIN_DEBIT that would take the balance below zero", async () => {
+      db.wallets.set("w1", { id: "w1", userId: "user1", balance: 50 });
+      await expect(
+        adminAdjustWallet("user1", 100, "ADMIN_DEBIT", "test", "admin1"),
+      ).rejects.toBeInstanceOf(InsufficientWalletBalanceError);
+      expect(db.wallets.get("w1")!.balance).toBe(50);
+    });
+
+    it("records the acting admin's id on an ADMIN_CREDIT", async () => {
+      db.wallets.set("w1", { id: "w1", userId: "user1", balance: 0 });
+      const txn = await adminAdjustWallet("user1", 75, "ADMIN_CREDIT", "goodwill", "admin1");
+      expect(db.wallets.get("w1")!.balance).toBe(75);
+      expect(txn.adminId).toBe("admin1");
     });
   });
 });

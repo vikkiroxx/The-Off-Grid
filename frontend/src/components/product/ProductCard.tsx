@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Product } from "@/types";
 import { getProductBadge } from "@/lib/product-helpers";
 import { Badge } from "@/components/ui/Badge";
+import { WishlistButton } from "@/components/product/WishlistButton";
 
 export function ProductCard({ product }: { product: Product }) {
   const badge = getProductBadge(product);
@@ -33,6 +34,9 @@ export function ProductCard({ product }: { product: Product }) {
             <Badge label={badge} />
           </div>
         )}
+        <div className="absolute top-2 right-2">
+          <WishlistButton productId={product.id} />
+        </div>
       </div>
 
       <div className="space-y-1 p-3">

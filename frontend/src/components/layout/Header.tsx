@@ -3,6 +3,7 @@ import { AudienceToggle } from "@/components/layout/AudienceToggle";
 import { AccountLink } from "@/components/layout/AccountLink";
 import { AdminLink } from "@/components/layout/AdminLink";
 import { CartLink } from "@/components/layout/CartLink";
+import { WishlistLink } from "@/components/layout/WishlistLink";
 import { HeaderSearch } from "@/components/layout/HeaderSearch";
 
 export function Header() {
@@ -29,6 +30,7 @@ export function Header() {
             All Products
           </Link>
           <HeaderSearch />
+          <WishlistLink />
           <CartLink />
           <AccountLink />
         </nav>

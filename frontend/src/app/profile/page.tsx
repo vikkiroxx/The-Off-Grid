@@ -11,7 +11,7 @@ import { reverseGeocode } from "@/lib/geocode";
 import { STATUS_STYLES } from "@/lib/order-helpers";
 import { SectionHeading } from "@/components/ui/SectionHeading";
 import type { PickedLocation } from "@/components/profile/MapPicker";
-import { Address, Order } from "@/types";
+import { Address, Order, Wallet } from "@/types";
 
 // Leaflet touches `window` at import time, so it can only load on the client.
 const MapPicker = dynamic(
@@ -48,6 +48,7 @@ export default function ProfilePage() {
   const [saved, setSaved] = useState(false);
 
   const [orders, setOrders] = useState<Order[] | null>(null);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
 
   const [addingAddress, setAddingAddress] = useState(false);
   const [addressForm, setAddressForm] = useState(EMPTY_ADDRESS_FORM);
@@ -84,6 +85,14 @@ export default function ProfilePage() {
       .get<Order[]>("/orders")
       .then(setOrders)
       .catch(() => setOrders([]));
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    api
+      .get<Wallet>("/wallet")
+      .then(setWallet)
+      .catch(() => setWallet(null));
   }, [user]);
 
   async function handleSave(e: FormEvent) {
@@ -249,6 +258,18 @@ export default function ProfilePage() {
             {saving ? "Saving…" : "Save changes"}
           </button>
         </form>
+      </section>
+
+      <section>
+        <SectionHeading eyebrow="Store Credit" title="Wallet" viewAllHref="/wallet" />
+        <div className="flex items-center justify-between rounded-[var(--radius-card)] border border-border px-5 py-4">
+          <p className="font-mono text-xs tracking-widest text-foreground-muted uppercase">
+            Balance
+          </p>
+          <p className="font-mono text-lg text-foreground">
+            ₹{wallet ? Number(wallet.balance).toFixed(2) : "—"}
+          </p>
+        </div>
       </section>
 
       <section>

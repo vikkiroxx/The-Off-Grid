@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/config/prisma";
 import { AuthRequest } from "@/middleware/auth";
 import { startPayment } from "@/payments/service";
+import { debitWalletForOrder, InsufficientWalletBalanceError } from "@/wallet/service";
 
 const ORDER_STATUSES = ["PENDING", "PAID", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"] as const;
 const RESTOCK_STATUSES = new Set(["CANCELLED", "REFUNDED"]);
@@ -14,8 +15,17 @@ const updateOrderSchema = z.object({
   trackingUrl: z.string().min(1).nullable().optional(),
 });
 
+const createOrderSchema = z.object({
+  paymentMethod: z.enum(["CASHFREE", "WALLET"]).default("CASHFREE"),
+});
+
 export async function createOrder(req: AuthRequest, res: Response) {
   const { shippingAddress } = req.body;
+  const parsed = createOrderSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
+  }
+  const { paymentMethod } = parsed.data;
   const userId = req.user!.id;
 
   const cartItems = await prisma.cartItem.findMany({
@@ -44,6 +54,7 @@ export async function createOrder(req: AuthRequest, res: Response) {
           userId,
           totalAmount,
           shippingAddress,
+          ...(paymentMethod === "WALLET" ? { status: "PAID" } : {}),
           items: {
             create: cartItems.map((item) => ({
               variantId: item.variantId,
@@ -54,6 +65,13 @@ export async function createOrder(req: AuthRequest, res: Response) {
         },
         include: { items: true },
       });
+
+      if (paymentMethod === "WALLET") {
+        // Debited before stock decrement so an insufficient balance rolls
+        // back the whole transaction (order + nothing-decremented-yet),
+        // exactly like the stock check above does.
+        await debitWalletForOrder(tx, userId, newOrder.id, totalAmount);
+      }
 
       for (const item of cartItems) {
         await tx.variant.update({
@@ -66,6 +84,11 @@ export async function createOrder(req: AuthRequest, res: Response) {
 
       return newOrder;
     });
+
+    if (paymentMethod === "WALLET") {
+      // Already paid — nothing to start with a gateway.
+      return res.status(201).json({ ...order, payment: null });
+    }
 
     // Stock is already committed at this point — a failure here just means
     // the customer retries payment via POST /orders/:id/pay; it never
@@ -84,6 +107,9 @@ export async function createOrder(req: AuthRequest, res: Response) {
       });
     }
   } catch (err) {
+    if (err instanceof InsufficientWalletBalanceError) {
+      return res.status(409).json({ message: err.message });
+    }
     res.status(409).json({ message: (err as Error).message });
   }
 }
@@ -131,6 +157,7 @@ export async function getAdminOrder(req: AuthRequest, res: Response) {
       user: { select: { id: true, name: true, email: true } },
       items: { include: { variant: { include: { product: true } } } },
       payments: { include: { refunds: true }, orderBy: { createdAt: "desc" } },
+      walletTransactions: { orderBy: { createdAt: "desc" } },
     },
   });
 

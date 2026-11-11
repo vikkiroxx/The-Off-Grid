@@ -6,6 +6,7 @@ import { Footer, FooterFallback } from "@/components/layout/Footer";
 import { ConditionalChrome } from "@/components/layout/ConditionalChrome";
 import { AuthProvider } from "@/lib/auth-context";
 import { CartProvider } from "@/lib/cart-context";
+import { WishlistProvider } from "@/lib/wishlist-context";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -45,16 +46,18 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col">
         <AuthProvider>
           <CartProvider>
-            <ConditionalChrome
-              header={<Header />}
-              footer={
-                <Suspense fallback={<FooterFallback />}>
-                  <Footer />
-                </Suspense>
-              }
-            >
-              {children}
-            </ConditionalChrome>
+            <WishlistProvider>
+              <ConditionalChrome
+                header={<Header />}
+                footer={
+                  <Suspense fallback={<FooterFallback />}>
+                    <Footer />
+                  </Suspense>
+                }
+              >
+                {children}
+              </ConditionalChrome>
+            </WishlistProvider>
           </CartProvider>
         </AuthProvider>
       </body>

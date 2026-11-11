@@ -8,12 +8,14 @@ import { useCart } from "@/lib/cart-context";
 import { api } from "@/lib/api";
 import { launchCheckout } from "@/lib/cashfree-checkout";
 import { SectionHeading } from "@/components/ui/SectionHeading";
-import { Order } from "@/types";
+import { Order, Wallet } from "@/types";
 
 interface CheckoutResponse extends Order {
   payment: { providerOrderId: string; sessionId: string | null } | null;
   paymentError?: string;
 }
+
+type PaymentMethod = "CASHFREE" | "WALLET";
 
 function unitPrice(item: { variant: { priceDelta: string; product: { price: string } } }) {
   return Number(item.variant.product.price) + Number(item.variant.priceDelta);
@@ -31,6 +33,8 @@ export default function CartPage() {
   const router = useRouter();
 
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("CASHFREE");
+  const [wallet, setWallet] = useState<Wallet | null>(null);
   const [placing, setPlacing] = useState(false);
   const [placeError, setPlaceError] = useState<string | null>(null);
   const [pendingItemId, setPendingItemId] = useState<string | null>(null);
@@ -40,6 +44,15 @@ export default function CartPage() {
       router.replace("/login");
     }
   }, [authLoading, user, router]);
+
+  useEffect(() => {
+    if (!user) return;
+    api
+      .get<Wallet>("/wallet")
+      .then(setWallet)
+      .catch(() => setWallet(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
   useEffect(() => {
     if (user) refreshAuth();
@@ -96,10 +109,17 @@ export default function CartPage() {
           pincode: address.pincode,
           phone: address.phone,
         },
+        paymentMethod,
       });
       // The order is placed (and stock/cart already updated server-side)
       // regardless of what happens next — refresh the cart either way.
       await refreshCart();
+
+      if (order.status === "PAID") {
+        // Paid synchronously from the wallet — no gateway round-trip.
+        router.push(`/orders/${order.id}`);
+        return;
+      }
 
       if (order.payment?.sessionId) {
         await launchCheckout(order.payment.sessionId);
@@ -117,6 +137,19 @@ export default function CartPage() {
     }
   }
 
+  const subtotal = items.reduce((sum, item) => sum + unitPrice(item) * item.quantity, 0);
+  const walletUsable = Boolean(wallet) && Number(wallet?.balance ?? 0) >= subtotal;
+
+  useEffect(() => {
+    if (paymentMethod === "WALLET" && !walletUsable) {
+      // Falling back the selection when the wallet option becomes unusable
+      // (e.g. cart total changed), not a derived value.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPaymentMethod("CASHFREE");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletUsable]);
+
   if (authLoading || !user) {
     return (
       <main className="mx-auto max-w-3xl px-6 py-20 text-center">
@@ -127,7 +160,6 @@ export default function CartPage() {
     );
   }
 
-  const subtotal = items.reduce((sum, item) => sum + unitPrice(item) * item.quantity, 0);
   const addresses = user.addresses ?? [];
 
   return (
@@ -266,6 +298,46 @@ export default function CartPage() {
                   ))}
                 </ul>
               )}
+            </div>
+
+            <div className="mt-6">
+              <p className="font-mono text-xs tracking-widest text-foreground-muted uppercase">
+                Pay with
+              </p>
+              <ul className="mt-2 space-y-2">
+                <li>
+                  <label className="flex cursor-pointer items-center justify-between rounded-[var(--radius-card)] border border-border px-4 py-3 text-sm text-foreground-muted has-[:checked]:border-accent has-[:checked]:text-foreground">
+                    <span className="flex items-center gap-3">
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === "CASHFREE"}
+                        onChange={() => setPaymentMethod("CASHFREE")}
+                        className="accent-accent"
+                      />
+                      Cashfree
+                    </span>
+                  </label>
+                </li>
+                <li>
+                  <label className="flex cursor-pointer items-center justify-between rounded-[var(--radius-card)] border border-border px-4 py-3 text-sm text-foreground-muted has-[:checked]:border-accent has-[:checked]:text-foreground has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
+                    <span className="flex items-center gap-3">
+                      <input
+                        type="radio"
+                        name="paymentMethod"
+                        checked={paymentMethod === "WALLET"}
+                        disabled={!walletUsable}
+                        onChange={() => setPaymentMethod("WALLET")}
+                        className="accent-accent"
+                      />
+                      Wallet
+                    </span>
+                    <span className="font-mono text-xs">
+                      ₹{wallet ? Number(wallet.balance).toFixed(2) : "—"}
+                    </span>
+                  </label>
+                </li>
+              </ul>
             </div>
 
             {placeError && <p className="mt-4 font-mono text-xs text-danger">{placeError}</p>}
