@@ -37,6 +37,13 @@ export interface CartItem {
   variant: Variant & { product: Product };
 }
 
+export interface WishlistItem {
+  id: string;
+  productId: string;
+  createdAt: string;
+  product: Product;
+}
+
 export interface Address {
   id: string;
   line1: string;
@@ -111,12 +118,32 @@ export interface Order {
   // Only present on admin endpoints (GET/PATCH /api/admin/orders/*).
   user?: { id: string; name: string; email: string };
   payments?: Payment[];
+  walletTransactions?: WalletTransaction[];
   items: Array<{
     id: string;
     quantity: number;
     price: string;
     variant: Variant & { product: Product };
   }>;
+}
+
+export interface WalletTransaction {
+  id: string;
+  type: "TOPUP" | "ORDER_PAYMENT" | "REFUND" | "ADMIN_CREDIT" | "ADMIN_DEBIT";
+  status: "PENDING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  amount: string; // signed — credits positive, debits negative
+  balanceAfter: string;
+  reason: string | null;
+  orderId: string | null;
+  createdAt: string;
+}
+
+export interface Wallet {
+  id: string;
+  balance: string;
+  transactions: WalletTransaction[];
+  // Only present on admin endpoints (GET /api/admin/wallets).
+  user?: { id: string; name: string; email: string };
 }
 
 export interface ContactMessage {

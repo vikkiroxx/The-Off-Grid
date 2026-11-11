@@ -234,7 +234,19 @@ export default function AdminOrderDetailPage({ params }: { params: Promise<{ id:
           </ul>
         )}
 
-        {order.payments?.some((p) => p.status === "SUCCEEDED" || p.status === "PARTIALLY_REFUNDED") && (
+        {!order.payments?.length && order.walletTransactions && order.walletTransactions.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {order.walletTransactions.map((txn) => (
+              <li key={txn.id} className="font-mono text-xs text-foreground-muted">
+                Wallet {txn.type.toLowerCase().replace("_", " ")} ₹{Math.abs(Number(txn.amount)).toFixed(2)}
+                {txn.reason ? ` (${txn.reason})` : ""}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {(order.payments?.some((p) => p.status === "SUCCEEDED" || p.status === "PARTIALLY_REFUNDED") ||
+          order.walletTransactions?.some((wt) => wt.type === "ORDER_PAYMENT")) && (
           <form onSubmit={handleRefund} className="mt-4 flex flex-wrap items-end gap-3">
             <div>
               <label

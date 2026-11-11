@@ -70,6 +70,12 @@ async function main() {
           },
         ],
       },
+      // Non-zero so manual wallet-checkout testing doesn't require a top-up
+      // round-trip first. update: {} on the outer upsert means a reseed won't
+      // reset a balance that's since changed by manual testing.
+      wallet: {
+        create: { balance: 500 },
+      },
     },
   });
 

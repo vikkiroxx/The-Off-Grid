@@ -116,7 +116,47 @@ or `DELIVERED`.
   Amount is validated against what's actually refundable (payment amount
   minus already-refunded), supporting partial refunds
   (`Payment.status` becomes `PARTIALLY_REFUNDED` until the full amount is
-  refunded).
+  refunded). **Refunds now always pay out to the customer's wallet**, not
+  back through the gateway — see "Wallet integration" below; `refundPayment()`
+  no longer calls `provider.refundPayment()` at all, so that provider method
+  is currently unused (kept on the interface for a future provider that might
+  need it, or if this decision is revisited).
+
+## Wallet integration
+
+Wallet top-ups are Cashfree-funded, so they reuse the `Payment` model rather
+than a parallel one — this gets the webhook dedup, optimistic
+double-processing guard, and reconcile-by-`providerOrderId` machinery above
+for free, instead of reimplementing it for a second async-gateway flow:
+
+- `Payment.purpose` (`ORDER_PAYMENT | WALLET_TOPUP`) discriminates the two
+  cases. `Payment.orderId` is nullable — always set for `ORDER_PAYMENT`,
+  always `null` for `WALLET_TOPUP` (a top-up funds a `WalletTransaction` via
+  `Payment.walletTransactionId`, not an `Order`).
+- `applyVerifiedResult()`'s `SUCCEEDED` branch is scoped to `purpose ===
+  "ORDER_PAYMENT"` for the `Order → PAID` update **and** the sibling-cancel
+  query — this guard is load-bearing, not cosmetic: with `orderId` nullable,
+  an unscoped sibling-cancel query would match (and cancel) *every other
+  user's* pending top-up at once, since they all share `orderId: null`. See
+  the regression test in `__tests__/service.test.ts` ("does not cancel
+  another user's pending top-up when one succeeds").
+- Paying an order *from* the wallet (`createOrder` with `paymentMethod:
+  "WALLET"`) never produces a `Payment` row at all — it's a synchronous
+  ledger debit inside the existing order-creation transaction
+  (`backend/src/wallet/service.ts#debitWalletForOrder`), not a gateway
+  attempt. `PaymentProvider` deliberately has no `WALLET` value for this
+  reason.
+- Refunding a wallet-paid order (no `Payment` row to attach a `Refund` to)
+  is a separate branch in `refundPayment()`: it validates against
+  `Order.totalAmount` minus prior wallet refunds for that order (via the
+  original debit's `WalletTransaction`, type `ORDER_PAYMENT`) and credits the
+  wallet directly — no `Refund` row, the `WalletTransaction` is the audit
+  record.
+- Wallet balance mutations (`backend/src/wallet/service.ts`) all go through
+  one guarded `UPDATE` (`WHERE balance >= amount` for debits, in the same
+  statement as the increment) — the wallet analogue of the optimistic
+  `Payment` status guard above, safe under concurrent debits without
+  `SERIALIZABLE` isolation.
 
 ## Configuring a provider
 

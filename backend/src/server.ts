@@ -8,11 +8,13 @@ import userRoutes from "@/routes/user.routes";
 import productRoutes from "@/routes/product.routes";
 import categoryRoutes from "@/routes/category.routes";
 import cartRoutes from "@/routes/cart.routes";
+import wishlistRoutes from "@/routes/wishlist.routes";
 import orderRoutes from "@/routes/order.routes";
 import uploadRoutes from "@/routes/upload.routes";
 import contactRoutes from "@/routes/contact.routes";
 import adminRoutes from "@/routes/admin.routes";
 import paymentRoutes from "@/routes/payment.routes";
+import walletRoutes from "@/routes/wallet.routes";
 import { errorHandler, notFound } from "@/middleware/errorHandler";
 import { validateEnv } from "@/config/env";
 
@@ -42,11 +44,13 @@ app.use("/api/users", userRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/cart", cartRoutes);
+app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/wallet", walletRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

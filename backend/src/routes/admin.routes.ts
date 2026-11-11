@@ -7,6 +7,11 @@ import {
   updateAdminMessage,
 } from "@/controllers/contact.controller";
 import { createAdminRefund } from "@/controllers/payment.controller";
+import {
+  adjustAdminWallet,
+  getAdminWallet,
+  listAdminWallets,
+} from "@/controllers/wallet.controller";
 import { requireAdmin, requireAuth } from "@/middleware/auth";
 
 const router = Router();
@@ -21,5 +26,8 @@ router.post("/orders/:id/refund", createAdminRefund);
 router.get("/messages", listAdminMessages);
 router.patch("/messages/:id", updateAdminMessage);
 router.delete("/messages/:id", deleteAdminMessage);
+router.get("/wallets", listAdminWallets);
+router.get("/wallets/:userId", getAdminWallet);
+router.post("/wallets/:userId/adjust", adjustAdminWallet);
 
 export default router;

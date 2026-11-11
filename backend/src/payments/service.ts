@@ -10,6 +10,12 @@ import {
   WebhookSignatureError,
 } from "@/payments/types";
 import { UnhandledWebhookEventError } from "@/payments/providers/cashfree/cashfree.provider";
+import {
+  completeTopUp,
+  creditWalletForRefund,
+  failTopUp,
+  getOrCreateWallet,
+} from "@/wallet/service";
 
 const ACTIVE_STATUSES = ["PENDING", "PROCESSING"] as const;
 const TERMINAL_STATUSES = ["SUCCEEDED", "FAILED", "CANCELLED", "REFUNDED", "PARTIALLY_REFUNDED"];
@@ -27,6 +33,10 @@ function buildReturnUrl() {
   // {order_id} is a literal placeholder Cashfree substitutes before redirecting —
   // not a template to fill in ourselves.
   return `${frontendUrl()}/checkout/result?order_id={order_id}`;
+}
+
+function buildWalletTopUpReturnUrl() {
+  return `${frontendUrl()}/wallet/result?order_id={order_id}`;
 }
 
 function buildNotifyUrl() {
@@ -132,6 +142,89 @@ export async function startPayment(orderId: string, requestingUserId: string): P
   }
 }
 
+// Starts a Cashfree-funded wallet top-up. Unlike startPayment, there's no
+// Order to scope a "resume active attempt" retry by — each submission is an
+// independent attempt. An abandoned PENDING top-up is simply left behind,
+// uncredited, matching the already-documented "no automatic expiry" gap for
+// order payments.
+export async function startWalletTopUp(userId: string, amount: number): Promise<Payment> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const defaultAddress = await prisma.address.findFirst({
+    where: { userId },
+    orderBy: { isDefault: "desc" },
+  });
+
+  const provider = getPaymentProvider();
+  const customer: PaymentCustomer = {
+    id: user.id,
+    name: user.name,
+    email: user.email,
+    phone: defaultAddress?.phone ?? "9999999999",
+  };
+
+  const paymentId = randomUUID();
+  const providerOrderId = `topup_${paymentId}`;
+  const idempotencyKey = randomUUID();
+
+  const { payment, walletTransactionId } = await prisma.$transaction(async (tx) => {
+    const wallet = await getOrCreateWallet(tx, userId);
+    const walletTransaction = await tx.walletTransaction.create({
+      data: {
+        walletId: wallet.id,
+        type: "TOPUP",
+        status: "PENDING",
+        amount,
+        balanceAfter: wallet.balance,
+      },
+    });
+    const created = await tx.payment.create({
+      data: {
+        id: paymentId,
+        purpose: "WALLET_TOPUP",
+        walletTransactionId: walletTransaction.id,
+        provider: provider.id,
+        providerOrderId,
+        idempotencyKey,
+        amount,
+        currency: "INR",
+        status: "PENDING",
+      },
+    });
+    return { payment: created, walletTransactionId: walletTransaction.id };
+  });
+
+  try {
+    const result = await provider.createPayment({
+      paymentId,
+      providerOrderId,
+      idempotencyKey,
+      amount,
+      currency: "INR",
+      customer,
+      returnUrl: buildWalletTopUpReturnUrl(),
+      notifyUrl: buildNotifyUrl(),
+    });
+
+    return await prisma.payment.update({
+      where: { id: payment.id },
+      data: { sessionId: result.sessionId, providerRefId: result.providerRefId },
+    });
+  } catch (err) {
+    await prisma.$transaction(async (tx) => {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "FAILED",
+          failureMessage:
+            err instanceof PaymentProviderError ? err.message : "Could not start top-up",
+        },
+      });
+      await failTopUp(tx, walletTransactionId, "FAILED");
+    });
+    throw err;
+  }
+}
+
 // The single trusted entry point for recording a payment outcome, called
 // from both the webhook handler and the customer-facing status-reconcile
 // endpoint. Idempotent: safe to call twice with the same (or stale) result,
@@ -179,19 +272,33 @@ async function applyVerifiedResult(
     }
 
     if (result.status === "SUCCEEDED") {
-      await tx.order.updateMany({
-        where: { id: payment.orderId, status: "PENDING" },
-        data: { status: "PAID" },
-      });
-      // Any sibling attempt (e.g. an abandoned first try) is now moot.
-      await tx.payment.updateMany({
-        where: {
-          orderId: payment.orderId,
-          id: { not: payment.id },
-          status: { in: ["PENDING", "PROCESSING"] },
-        },
-        data: { status: "CANCELLED" },
-      });
+      if (payment.purpose === "ORDER_PAYMENT") {
+        // orderId is guaranteed non-null when purpose is ORDER_PAYMENT.
+        await tx.order.updateMany({
+          where: { id: payment.orderId!, status: "PENDING" },
+          data: { status: "PAID" },
+        });
+        // Any sibling attempt (e.g. an abandoned first try) is now moot.
+        // Scoped to purpose === ORDER_PAYMENT deliberately: payment.orderId is
+        // null for WALLET_TOPUP payments, and an unscoped query here would
+        // match (and cancel) every other user's pending top-up at once.
+        await tx.payment.updateMany({
+          where: {
+            orderId: payment.orderId,
+            id: { not: payment.id },
+            status: { in: ["PENDING", "PROCESSING"] },
+          },
+          data: { status: "CANCELLED" },
+        });
+      } else if (payment.walletTransactionId) {
+        await completeTopUp(tx, payment.walletTransactionId);
+      }
+    } else if (
+      payment.purpose === "WALLET_TOPUP" &&
+      payment.walletTransactionId &&
+      (result.status === "FAILED" || result.status === "CANCELLED")
+    ) {
+      await failTopUp(tx, payment.walletTransactionId, result.status);
     }
 
     const updated = await tx.payment.findUniqueOrThrow({ where: { id: payment.id } });
@@ -206,10 +313,11 @@ export async function reconcilePaymentStatus(
   const provider = getPaymentProvider();
   const payment = await prisma.payment.findUnique({
     where: { provider_providerOrderId: { provider: provider.id, providerOrderId } },
-    include: { order: true },
+    include: { order: true, walletTransaction: { include: { wallet: true } } },
   });
 
-  if (!payment || payment.order.userId !== requestingUserId) {
+  const ownerId = payment?.order?.userId ?? payment?.walletTransaction?.wallet.userId;
+  if (!payment || ownerId !== requestingUserId) {
     throw new PaymentNotFoundError("Payment not found");
   }
 
@@ -278,62 +386,92 @@ export async function handleWebhook(args: {
 
 // Admin-triggered only (enforced by the controller/route, not here) — a
 // deliberate action, never an automatic side effect of changing order status.
+//
+// Refunds now always pay out to the customer's wallet rather than back
+// through the gateway — a single atomic DB write, so this either fully
+// succeeds (synchronously SUCCEEDED) or throws before anything is written.
+// There's no provider round-trip to fail mid-flight anymore.
 export async function refundPayment(
   orderId: string,
   amount: number,
   reason: string | undefined,
 ) {
+  if (amount <= 0) {
+    throw new RefundNotAllowedError("Refund amount must be greater than 0");
+  }
+
   const payment = await prisma.payment.findFirst({
-    where: { orderId, status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED"] } },
-    include: { refunds: true },
+    where: { orderId, purpose: "ORDER_PAYMENT", status: { in: ["SUCCEEDED", "PARTIALLY_REFUNDED"] } },
+    include: { refunds: true, order: true },
   });
 
-  if (!payment) {
+  if (payment) {
+    const alreadyRefunded = payment.refunds
+      .filter((r) => REFUND_OPEN_STATUSES.includes(r.status))
+      .reduce((sum, r) => sum + Number(r.amount), 0);
+    const refundable = Number(payment.amount) - alreadyRefunded;
+
+    if (amount > refundable + 0.01) {
+      throw new RefundNotAllowedError(
+        `Refund amount must be between 0.01 and ${refundable.toFixed(2)} (already refunded: ${alreadyRefunded.toFixed(2)})`,
+      );
+    }
+
+    return prisma.$transaction(async (tx) => {
+      // Gateway-funded order ("order" is always set when purpose is
+      // ORDER_PAYMENT) — credit the wallet instead of calling the provider.
+      const walletTransaction = await creditWalletForRefund(
+        tx,
+        payment.order!.userId,
+        orderId,
+        amount,
+        reason,
+      );
+      const refund = await tx.refund.create({
+        data: {
+          paymentId: payment.id,
+          refundRef: `rfd_${randomUUID()}`,
+          amount,
+          reason,
+          status: "SUCCEEDED",
+          walletTransactionId: walletTransaction.id,
+        },
+      });
+
+      const totalRefunded = alreadyRefunded + amount;
+      const paymentStatus =
+        totalRefunded >= Number(payment.amount) - 0.01 ? "REFUNDED" : "PARTIALLY_REFUNDED";
+      await tx.payment.update({ where: { id: payment.id }, data: { status: paymentStatus } });
+
+      return refund;
+    });
+  }
+
+  // No gateway Payment exists for this order — it must have been paid
+  // entirely from the wallet. Confirm that's actually the case (don't let an
+  // unpaid order be "refunded") via the original debit's WalletTransaction.
+  const orderDebit = await prisma.walletTransaction.findFirst({
+    where: { orderId, type: "ORDER_PAYMENT" },
+  });
+  const order = orderDebit ? await prisma.order.findUnique({ where: { id: orderId } }) : null;
+  if (!orderDebit || !order) {
     throw new RefundNotAllowedError("No successful payment found for this order");
   }
 
-  const alreadyRefunded = payment.refunds
-    .filter((r) => REFUND_OPEN_STATUSES.includes(r.status))
-    .reduce((sum, r) => sum + Number(r.amount), 0);
-  const refundable = Number(payment.amount) - alreadyRefunded;
+  const priorWalletRefunds = await prisma.walletTransaction.aggregate({
+    where: { orderId, type: "REFUND" },
+    _sum: { amount: true },
+  });
+  const alreadyRefunded = Number(priorWalletRefunds._sum.amount ?? 0);
+  const refundable = Number(order.totalAmount) - alreadyRefunded;
 
-  if (amount <= 0 || amount > refundable + 0.01) {
+  if (amount > refundable + 0.01) {
     throw new RefundNotAllowedError(
       `Refund amount must be between 0.01 and ${refundable.toFixed(2)} (already refunded: ${alreadyRefunded.toFixed(2)})`,
     );
   }
 
-  const refundRef = `rfd_${randomUUID()}`;
-  const refund = await prisma.refund.create({
-    data: { paymentId: payment.id, refundRef, amount, reason, status: "PENDING" },
-  });
-
-  const provider = getPaymentProvider();
-  try {
-    const result = await provider.refundPayment({
-      providerOrderId: payment.providerOrderId,
-      refundRef,
-      amount,
-      reason,
-    });
-
-    const updatedRefund = await prisma.refund.update({
-      where: { id: refund.id },
-      data: { status: result.status, providerRefundId: result.providerRefundId },
-    });
-
-    if (REFUND_OPEN_STATUSES.includes(updatedRefund.status)) {
-      const totalRefunded = alreadyRefunded + amount;
-      const paymentStatus =
-        totalRefunded >= Number(payment.amount) - 0.01 ? "REFUNDED" : "PARTIALLY_REFUNDED";
-      await prisma.payment.update({ where: { id: payment.id }, data: { status: paymentStatus } });
-    }
-
-    return updatedRefund;
-  } catch (err) {
-    await prisma.refund.update({ where: { id: refund.id }, data: { status: "FAILED" } });
-    throw err;
-  }
+  return prisma.$transaction((tx) => creditWalletForRefund(tx, order.userId, orderId, amount, reason));
 }
 
 export { WebhookSignatureError };

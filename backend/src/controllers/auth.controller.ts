@@ -122,6 +122,7 @@ export async function verifySignupOtp(req: Request, res: Response) {
     const created = await tx.user.create({
       data: { name: pending.name, email: pending.email, password: pending.password },
     });
+    await tx.wallet.create({ data: { userId: created.id, balance: 0 } });
     await tx.pendingSignup.delete({ where: { email } });
     return created;
   });

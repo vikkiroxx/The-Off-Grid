@@ -6,6 +6,7 @@ import { Product } from "@/types";
 import { getProductBadge } from "@/lib/product-helpers";
 import { Badge } from "@/components/ui/Badge";
 import { AddToCart } from "@/components/product/AddToCart";
+import { WishlistButton } from "@/components/product/WishlistButton";
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
 
@@ -113,9 +114,12 @@ async function ProductDetail({ slug }: { slug: string }) {
           <p className="font-mono text-xs tracking-widest text-accent uppercase">
             {product.category.name}
           </p>
-          <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-            {product.name}
-          </h1>
+          <div className="mt-2 flex items-start justify-between gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+              {product.name}
+            </h1>
+            <WishlistButton productId={product.id} />
+          </div>
           <div className="mt-3 flex items-center gap-3">
             <p className="font-mono text-lg text-foreground">₹{product.price}</p>
             {badge && <Badge label={badge} />}
