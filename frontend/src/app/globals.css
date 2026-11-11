@@ -1,17 +1,43 @@
 @import "tailwindcss";
 
 :root {
-  --background: #060708;
-  --background-elevated: #0d0f13;
-  --foreground: #eef1f6;
-  --foreground-muted: #8b93a3;
-  --border: #1d2129;
-  --border-strong: #2a2f3a;
-  --accent: #39f3c4;
-  --accent-2: #7c6cff;
-  --accent-soft: rgba(57, 243, 196, 0.12);
-  --danger: #ff5a5f;
+  color-scheme: dark;
+  --background: #0c0e09;
+  --background-elevated: #171910;
+  --foreground: #f2f2e8;
+  --foreground-muted: #9e8793;
+  --border: #242619;
+  --border-strong: #34381f;
+  --accent: #ff2070;
+  --accent-2: #fcff1a;
+  --accent-soft: rgba(255, 32, 112, 0.12);
+  --accent-2-soft: rgba(252, 255, 26, 0.12);
+  --accent-select: rgba(255, 32, 112, 0.35);
+  --danger: #ff3b3b;
+  --on-accent: #000000;
+  --on-accent-2: #000000;
   --radius-card: 6px;
+}
+
+/* Deeper, desaturated shades of the same brand hues — the neon values above
+   fail text contrast on a light surface, so light mode gets its own ramp
+   rather than reusing --accent/--accent-2/--danger verbatim. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --background: #faf9f0;
+  --background-elevated: #ffffff;
+  --foreground: #0c0e09;
+  --foreground-muted: #6e5a63;
+  --border: #e6e3d3;
+  --border-strong: #d2ceb4;
+  --accent: #c8135f;
+  --accent-2: #806500;
+  --accent-soft: rgba(200, 19, 95, 0.1);
+  --accent-2-soft: rgba(128, 101, 0, 0.1);
+  --accent-select: rgba(200, 19, 95, 0.25);
+  --danger: #c62121;
+  --on-accent: #ffffff;
+  --on-accent-2: #ffffff;
 }
 
 @theme inline {
@@ -24,7 +50,10 @@
   --color-accent: var(--accent);
   --color-accent-2: var(--accent-2);
   --color-accent-soft: var(--accent-soft);
+  --color-accent-2-soft: var(--accent-2-soft);
   --color-danger: var(--danger);
+  --color-on-accent: var(--on-accent);
+  --color-on-accent-2: var(--on-accent-2);
   --radius-card: var(--radius-card);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
@@ -34,6 +63,37 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+::selection {
+  background: var(--accent-select);
+  color: var(--foreground);
+}
+
+* {
+  scrollbar-color: var(--border-strong) var(--background);
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 8px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
 }
 
 /* Hides the native scrollbar on horizontally-scrollable rows (carousels) while keeping scroll/drag intact. */
@@ -66,14 +126,18 @@ body {
   opacity: 0.4;
 }
 
-/* Hairline-to-accent glow on hover, used by product/category cards. */
+/* Hairline-to-accent glow on hover, used by product/category cards.
+   --card-glow/--card-glow-soft let an individual card override the hue
+   (e.g. product tiles already in the cart glow electric-sun instead of pink). */
 @utility card-hover-glow {
   transition:
     border-color 0.2s ease,
     box-shadow 0.2s ease;
   &:hover {
-    border-color: var(--color-accent);
-    box-shadow: 0 0 0 1px var(--color-accent-soft), 0 0 24px var(--color-accent-soft);
+    border-color: var(--card-glow, var(--color-accent));
+    box-shadow:
+      0 0 0 1px var(--card-glow-soft, var(--color-accent-soft)),
+      0 0 24px var(--card-glow-soft, var(--color-accent-soft));
   }
 }
 
@@ -86,7 +150,7 @@ body {
     position: absolute;
     width: 14px;
     height: 14px;
-    border-color: var(--color-accent);
+    border-color: var(--card-glow, var(--color-accent));
     opacity: 0;
     transition: opacity 0.2s ease;
     pointer-events: none;

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/config/prisma";
 import { AuthRequest } from "@/middleware/auth";
 import { startPayment } from "@/payments/service";
-import { debitWalletForOrder, InsufficientWalletBalanceError } from "@/wallet/service";
+import { debitWalletForOrder, getOrCreateWallet, InsufficientWalletBalanceError } from "@/wallet/service";
 
 const ORDER_STATUSES = ["PENDING", "PAID", "SHIPPED", "DELIVERED", "CANCELLED", "REFUNDED"] as const;
 const RESTOCK_STATUSES = new Set(["CANCELLED", "REFUNDED"]);
@@ -16,7 +16,12 @@ const updateOrderSchema = z.object({
 });
 
 const createOrderSchema = z.object({
-  paymentMethod: z.enum(["CASHFREE", "WALLET"]).default("CASHFREE"),
+  // When true, the order is funded from the wallet first (up to whatever
+  // balance is available) and only the remainder — if any — goes to the
+  // gateway. A balance that covers the whole order skips the gateway leg
+  // entirely; one that covers none of it behaves exactly like a plain
+  // gateway checkout.
+  useWalletBalance: z.boolean().default(false),
 });
 
 export async function createOrder(req: AuthRequest, res: Response) {
@@ -25,7 +30,7 @@ export async function createOrder(req: AuthRequest, res: Response) {
   if (!parsed.success) {
     return res.status(400).json({ message: "Invalid input", errors: parsed.error.flatten() });
   }
-  const { paymentMethod } = parsed.data;
+  const { useWalletBalance } = parsed.data;
   const userId = req.user!.id;
 
   const cartItems = await prisma.cartItem.findMany({
@@ -38,7 +43,7 @@ export async function createOrder(req: AuthRequest, res: Response) {
   }
 
   try {
-    const order = await prisma.$transaction(async (tx) => {
+    const { order, walletAmount, remainder } = await prisma.$transaction(async (tx) => {
       let totalAmount = 0;
 
       for (const item of cartItems) {
@@ -49,12 +54,19 @@ export async function createOrder(req: AuthRequest, res: Response) {
         totalAmount += unitPrice * item.quantity;
       }
 
+      let walletAmount = 0;
+      if (useWalletBalance) {
+        const wallet = await getOrCreateWallet(tx, userId);
+        walletAmount = Math.min(Number(wallet.balance), totalAmount);
+      }
+      const remainder = totalAmount - walletAmount;
+
       const newOrder = await tx.order.create({
         data: {
           userId,
           totalAmount,
           shippingAddress,
-          ...(paymentMethod === "WALLET" ? { status: "PAID" } : {}),
+          ...(remainder <= 0 ? { status: "PAID" } : {}),
           items: {
             create: cartItems.map((item) => ({
               variantId: item.variantId,
@@ -66,11 +78,11 @@ export async function createOrder(req: AuthRequest, res: Response) {
         include: { items: true },
       });
 
-      if (paymentMethod === "WALLET") {
+      if (walletAmount > 0) {
         // Debited before stock decrement so an insufficient balance rolls
         // back the whole transaction (order + nothing-decremented-yet),
         // exactly like the stock check above does.
-        await debitWalletForOrder(tx, userId, newOrder.id, totalAmount);
+        await debitWalletForOrder(tx, userId, newOrder.id, walletAmount);
       }
 
       for (const item of cartItems) {
@@ -82,26 +94,30 @@ export async function createOrder(req: AuthRequest, res: Response) {
 
       await tx.cartItem.deleteMany({ where: { userId } });
 
-      return newOrder;
+      return { order: newOrder, walletAmount, remainder };
     });
 
-    if (paymentMethod === "WALLET") {
-      // Already paid — nothing to start with a gateway.
-      return res.status(201).json({ ...order, payment: null });
+    if (remainder <= 0) {
+      // Wallet balance covered the whole order — nothing to start with a gateway.
+      return res.status(201).json({ ...order, payment: null, walletAmountUsed: walletAmount });
     }
 
     // Stock is already committed at this point — a failure here just means
     // the customer retries payment via POST /orders/:id/pay; it never
-    // re-creates the order or touches stock again.
+    // re-creates the order or touches stock again. startPayment nets out
+    // walletAmount on its own (via the wallet debit just recorded above), so
+    // it already asks the gateway for exactly `remainder`, not the full total.
     try {
       const payment = await startPayment(order.id, userId);
       res.status(201).json({
         ...order,
+        walletAmountUsed: walletAmount,
         payment: { providerOrderId: payment.providerOrderId, sessionId: payment.sessionId },
       });
     } catch (err) {
       res.status(201).json({
         ...order,
+        walletAmountUsed: walletAmount,
         payment: null,
         paymentError: (err as Error).message,
       });

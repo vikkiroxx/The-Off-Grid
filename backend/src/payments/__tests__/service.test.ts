@@ -3,10 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // static one), so @/config/prisma and @/payments/factory are already mocked
 // by the time @/payments/service's own top-level imports resolve them.
 import {
+  OrderNotPayableError,
   RefundNotAllowedError,
   handleWebhook,
   reconcilePaymentStatus,
   refundPayment,
+  startPayment,
 } from "@/payments/service";
 import { adminAdjustWallet, debitWalletForOrder, InsufficientWalletBalanceError } from "@/wallet/service";
 
@@ -467,6 +469,45 @@ describe("payments service", () => {
     });
   });
 
+  describe("startPayment", () => {
+    it("nets out a prior wallet debit so the gateway is only asked for the remainder", async () => {
+      db.orders.set("o5", { id: "o5", userId: "user5", status: "PENDING", totalAmount: 500, shippingAddress: {} });
+      db.walletTransactions.set("debit5", {
+        id: "debit5",
+        walletId: "wallet_placeholder",
+        type: "ORDER_PAYMENT",
+        status: "COMPLETED",
+        amount: -200,
+        balanceAfter: 0,
+        orderId: "o5",
+      });
+      mockProvider.createPayment.mockResolvedValue({ sessionId: "sess1", providerRefId: "ref1" });
+
+      await startPayment("o5", "user5");
+
+      expect(mockProvider.createPayment).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 300 }),
+      );
+      const created = [...db.payments.values()].find((p) => p.orderId === "o5");
+      expect(Number(created?.amount)).toBe(300);
+    });
+
+    it("refuses to start a gateway payment once the wallet already covers the full order", async () => {
+      db.orders.set("o6", { id: "o6", userId: "user6", status: "PENDING", totalAmount: 500, shippingAddress: {} });
+      db.walletTransactions.set("debit6", {
+        id: "debit6",
+        walletId: "wallet_placeholder",
+        type: "ORDER_PAYMENT",
+        status: "COMPLETED",
+        amount: -500,
+        balanceAfter: 0,
+        orderId: "o6",
+      });
+
+      await expect(startPayment("o6", "user6")).rejects.toBeInstanceOf(OrderNotPayableError);
+    });
+  });
+
   describe("reconcilePaymentStatus", () => {
     it("rejects a customer looking up another customer's payment", async () => {
       seedOrderWithPayment({ orderId: "o1", paymentId: "p1", amount: 500, status: "PENDING" });
@@ -540,6 +581,57 @@ describe("payments service", () => {
     it("rejects a refund for an order that was never paid at all", async () => {
       db.orders.set("o3", { id: "o3", userId: "user3", status: "PENDING", totalAmount: 100, shippingAddress: {} });
       await expect(refundPayment("o3", 50, undefined)).rejects.toBeInstanceOf(RefundNotAllowedError);
+    });
+
+    describe("split wallet + gateway order", () => {
+      function seedSplitOrder() {
+        // ₹500 order: ₹200 from the wallet, ₹300 via a (now-succeeded) gateway payment.
+        db.orders.set("o4", { id: "o4", userId: "user4", status: "PAID", totalAmount: 500, shippingAddress: {} });
+        db.payments.set("p4", {
+          id: "p4",
+          orderId: "o4",
+          purpose: "ORDER_PAYMENT",
+          provider: "CASHFREE",
+          providerOrderId: "pay_p4",
+          providerPaymentId: null,
+          amount: 300,
+          currency: "INR",
+          status: "SUCCEEDED",
+          idempotencyKey: "idem_p4",
+          sessionId: null,
+        });
+        db.walletTransactions.set("debit4", {
+          id: "debit4",
+          walletId: "wallet_placeholder",
+          type: "ORDER_PAYMENT",
+          status: "COMPLETED",
+          amount: -200,
+          balanceAfter: 0,
+          orderId: "o4",
+        });
+      }
+
+      it("draws a refund from the gateway pool first, then the wallet-debit pool", async () => {
+        seedSplitOrder();
+
+        await refundPayment("o4", 100, "partial");
+        expect(db.payments.get("p4")!.status).toBe("PARTIALLY_REFUNDED");
+        let wallet = [...db.wallets.values()].find((w) => w.userId === "user4");
+        expect(wallet?.balance).toBe(100);
+
+        // Gateway pool had 200 left (300 - 100); this refund exhausts it (200)
+        // and draws the remaining 50 from the wallet-debit pool.
+        await refundPayment("o4", 250, "rest");
+        expect(db.payments.get("p4")!.status).toBe("REFUNDED");
+        wallet = [...db.wallets.values()].find((w) => w.userId === "user4");
+        expect(wallet?.balance).toBe(350);
+
+        // 500 total - 350 already refunded = 150 left (all wallet-debit pool).
+        await expect(refundPayment("o4", 151, undefined)).rejects.toThrow(/must be between/);
+        await refundPayment("o4", 150, undefined);
+        wallet = [...db.wallets.values()].find((w) => w.userId === "user4");
+        expect(wallet?.balance).toBe(500);
+      });
     });
   });
 

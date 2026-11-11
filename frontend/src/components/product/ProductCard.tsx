@@ -1,16 +1,37 @@
+"use client";
+
 import Link from "next/link";
+import { CSSProperties } from "react";
 import { Product } from "@/types";
 import { getProductBadge } from "@/lib/product-helpers";
 import { Badge } from "@/components/ui/Badge";
 import { WishlistButton } from "@/components/product/WishlistButton";
+import { QuickAddButton } from "@/components/product/QuickAddButton";
+import { useCart } from "@/lib/cart-context";
 
 export function ProductCard({ product }: { product: Product }) {
+  const { items } = useCart();
   const badge = getProductBadge(product);
   const [primary, hover] = product.images;
+
+  const defaultVariant = product.variants.find((v) => v.stock > 0);
+  const inCart = defaultVariant
+    ? items.some((item) => item.variant.id === defaultVariant.id)
+    : false;
+
+  // Flips the shared hover-glow/corner-bracket hue from Hyper Neon to
+  // Electric Sun once this product's default variant is already in the cart.
+  const glowStyle = inCart
+    ? ({
+        "--card-glow": "var(--color-accent-2)",
+        "--card-glow-soft": "var(--color-accent-2-soft)",
+      } as CSSProperties)
+    : undefined;
 
   return (
     <Link
       href={`/products/${product.slug}`}
+      style={glowStyle}
       className="group corner-brackets card-hover-glow block overflow-hidden rounded-[var(--radius-card)] border border-border bg-background-elevated"
     >
       <div className="relative aspect-[4/5] overflow-hidden bg-background">
@@ -34,8 +55,9 @@ export function ProductCard({ product }: { product: Product }) {
             <Badge label={badge} />
           </div>
         )}
-        <div className="absolute top-2 right-2">
+        <div className="absolute top-2 right-2 flex flex-col gap-2">
           <WishlistButton productId={product.id} />
+          <QuickAddButton variants={product.variants} />
         </div>
       </div>
 

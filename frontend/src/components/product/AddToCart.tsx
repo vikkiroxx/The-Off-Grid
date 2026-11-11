@@ -8,7 +8,7 @@ import { Product } from "@/types";
 
 export function AddToCart({ product }: { product: Product }) {
   const { user } = useAuth();
-  const { addToCart } = useCart();
+  const { items, addToCart, removeItem } = useCart();
   const router = useRouter();
 
   const variants = product.variants;
@@ -16,29 +16,31 @@ export function AddToCart({ product }: { product: Product }) {
     variants.find((v) => v.stock > 0)?.id ?? null,
   );
   const [quantity, setQuantity] = useState(1);
-  const [adding, setAdding] = useState(false);
-  const [added, setAdded] = useState(false);
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selected = variants.find((v) => v.id === selectedId) ?? null;
+  const cartItem = selected ? items.find((item) => item.variant.id === selected.id) : undefined;
 
-  async function handleAdd() {
+  async function handleToggle() {
     if (!user) {
       router.push("/login");
       return;
     }
     if (!selected) return;
 
-    setAdding(true);
+    setPending(true);
     setError(null);
-    setAdded(false);
     try {
-      await addToCart(selected.id, quantity);
-      setAdded(true);
+      if (cartItem) {
+        await removeItem(cartItem.id);
+      } else {
+        await addToCart(selected.id, quantity);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setAdding(false);
+      setPending(false);
     }
   }
 
@@ -64,7 +66,6 @@ export function AddToCart({ product }: { product: Product }) {
             onClick={() => {
               setSelectedId(variant.id);
               setQuantity(1);
-              setAdded(false);
             }}
             className={`rounded-[var(--radius-card)] border px-3 py-2 font-mono text-xs uppercase ${
               variant.id === selectedId
@@ -99,11 +100,23 @@ export function AddToCart({ product }: { product: Product }) {
 
         <button
           type="button"
-          onClick={handleAdd}
-          disabled={!selected || selected.stock === 0 || adding}
-          className="flex-1 rounded-[var(--radius-card)] border border-accent px-6 py-3 font-mono text-xs tracking-widest text-accent uppercase hover:bg-accent-soft disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={handleToggle}
+          disabled={!selected || pending || (!cartItem && selected.stock === 0)}
+          className={`flex-1 rounded-[var(--radius-card)] border px-6 py-3 font-mono text-xs tracking-widest uppercase disabled:cursor-not-allowed disabled:opacity-50 ${
+            cartItem
+              ? "border-accent-2 text-accent-2 hover:bg-accent-2-soft"
+              : "border-accent text-accent hover:bg-accent-soft"
+          }`}
         >
-          {adding ? "Adding…" : added ? "Added to cart ✓" : user ? "Add to cart" : "Log in to add"}
+          {pending
+            ? cartItem
+              ? "Removing…"
+              : "Adding…"
+            : !user
+              ? "Log in to add"
+              : cartItem
+                ? "Added to cart ✓"
+                : "Add to cart"}
         </button>
       </div>
 

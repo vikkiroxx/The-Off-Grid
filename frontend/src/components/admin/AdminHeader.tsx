@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { ThemeToggle } from "@/components/layout/ThemeToggle";
 
 export function AdminHeader() {
   const { user, logout } = useAuth();
@@ -17,13 +18,16 @@ export function AdminHeader() {
       <p className="font-mono text-xs tracking-widest text-foreground-muted uppercase">
         {user ? `Signed in as ${user.name}` : ""}
       </p>
-      <button
-        type="button"
-        onClick={handleLogout}
-        className="rounded-[var(--radius-card)] border border-border px-4 py-2 font-mono text-xs tracking-widest text-foreground-muted uppercase outline-none hover:border-danger hover:text-danger focus-visible:ring-2 focus-visible:ring-accent"
-      >
-        Log out
-      </button>
+      <div className="flex items-center gap-4">
+        <ThemeToggle />
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="rounded-[var(--radius-card)] border border-border px-4 py-2 font-mono text-xs tracking-widest text-foreground-muted uppercase outline-none hover:border-danger hover:text-danger focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          Log out
+        </button>
+      </div>
     </header>
   );
 }
